@@ -1,0 +1,11 @@
+{
+  "name": "reuse-first",
+  "version": "0.1.0",
+  "description": "Find existing GitHub codebases for your idea, study their architecture, and build on it.",
+  "mcpServers": {
+    "reuse-first": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/server.py"]
+    }
+  }
+}
