@@ -10,7 +10,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -18,17 +17,15 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from architecture import _slug, scaffold  # noqa: E402
+from github import GitHubError  # noqa: E402
 from server import find, get_blueprint  # noqa: E402
 
 app = FastAPI(title="reuse-first demo")
 _zips: dict[str, tuple[str, bytes]] = {}
 
 
-def _gh_error(e: httpx.HTTPStatusError):
-    code = e.response.status_code
-    msg = "GitHub rate limit hit. Set GITHUB_TOKEN and restart." if code in (403, 429) \
-        else f"GitHub returned {code}."
-    raise HTTPException(502, msg)
+def _gh_error(e: GitHubError):
+    raise HTTPException(502, str(e))  # a new GITHUB_TOKEN needs a demo restart to take effect
 
 
 @app.get("/")
@@ -42,7 +39,7 @@ async def api_find(q: str, copyleft: bool = False):
         raise HTTPException(400, "Describe the project in a few words.")
     try:
         return await find(q, 10, copyleft)
-    except httpx.HTTPStatusError as e:
+    except GitHubError as e:
         _gh_error(e)
 
 
@@ -50,7 +47,7 @@ async def api_find(q: str, copyleft: bool = False):
 async def api_blueprint(repo: str):
     try:
         return await get_blueprint(repo)
-    except httpx.HTTPStatusError as e:
+    except GitHubError as e:
         _gh_error(e)
 
 
@@ -64,7 +61,7 @@ class ScaffoldReq(BaseModel):
 async def api_scaffold(req: ScaffoldReq):
     try:
         bp = await get_blueprint(req.repo)
-    except httpx.HTTPStatusError as e:
+    except GitHubError as e:
         _gh_error(e)
     with tempfile.TemporaryDirectory() as tmp:
         name = req.name or "my-project"

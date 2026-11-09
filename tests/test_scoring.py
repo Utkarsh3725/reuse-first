@@ -1,13 +1,16 @@
-import asyncio
+import io
+import json
 import sys
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+import github  # noqa: E402
 from cache import Cache  # noqa: E402
-from github import search_repos  # noqa: E402
+from github import GitHubError, search_repos  # noqa: E402
 from scoring import rank, score_repo  # noqa: E402
 
 NOW = datetime(2026, 11, 9, tzinfo=timezone.utc)
@@ -40,21 +43,54 @@ def test_excluded_repos_rank_last():
     assert [r["full_name"] for r in rank([bad, good], "pdf table")] == ["good/x", "bad/x"]
 
 
-def test_search_is_cached(tmp_path):
-    calls = 0
+BODY = {"items": [{"full_name": "a/b", "html_url": "u", "stargazers_count": 5}]}
 
-    def handler(request):
-        nonlocal calls
-        calls += 1
-        return httpx.Response(200, json={"items": [{
-            "full_name": "a/b", "html_url": "u", "stargazers_count": 5}]},
-            headers={"etag": "abc"})
 
-    async def run():
-        cache = Cache(str(tmp_path / "c.db"))
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-            return await search_repos("pdf", cache, client=c), await search_repos("pdf", cache, client=c)
+class FakeResp(io.BytesIO):
+    status = 200
+    headers = {"ETag": "abc"}
 
-    first, second = asyncio.run(run())
-    assert first == second and calls == 1
+
+def fake_open(responses, seen):
+    """Stands in for urllib's urlopen: replays `responses`, records request headers."""
+    def _open(req, timeout):
+        seen.append(dict(req.header_items()))
+        r = responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    return _open
+
+
+def test_search_is_cached(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(github, "_open", fake_open([FakeResp(json.dumps(BODY).encode())], seen))
+    cache = Cache(str(tmp_path / "c.db"))
+    first, second = search_repos("pdf", cache), search_repos("pdf", cache)
+    assert first == second and len(seen) == 1
     assert first[0]["license"] is None  # unknown stays None
+
+
+def test_stale_cache_revalidates_with_etag(tmp_path, monkeypatch):
+    seen = []
+    not_modified = urllib.error.HTTPError("u", 304, "Not Modified", {"ETag": "abc"}, None)
+    monkeypatch.setattr(github, "_open", fake_open(
+        [FakeResp(json.dumps(BODY).encode()), not_modified], seen))
+    cache = Cache(str(tmp_path / "c.db"), ttl=0)  # every entry is stale at once
+    first, second = search_repos("pdf", cache), search_repos("pdf", cache)
+    assert second == first and len(seen) == 2
+    assert seen[1].get("If-none-match") == "abc"  # urllib capitalizes header names
+
+
+def test_search_error_raises(tmp_path, monkeypatch):
+    limited = urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+    monkeypatch.setattr(github, "_open", fake_open([limited], []))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with pytest.raises(GitHubError) as e:
+        search_repos("pdf", Cache(str(tmp_path / "c.db")))
+    assert e.value.status == 403 and "set GITHUB_TOKEN" in str(e.value)
+
+
+def test_rate_limit_message_with_token_says_wait(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    assert "wait a minute" in str(GitHubError(429, "/search/repositories"))

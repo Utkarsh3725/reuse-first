@@ -1,6 +1,9 @@
-# reuse-first plugin
-
-Tell your assistant what you want to build. It searches GitHub for existing projects, ranks them by health and license, extracts the best one's architecture, scaffolds your project in that shape, and then builds it.
+# reuse-first
+Tell Claude what you want to build, and reuse-first finds open-source GitHub projects that already do it, ranks them by activity, popularity and license, and sets up your project in the best one's structure. For developers using Claude Code.
+```bash
+git clone https://github.com/beingaeditor/reuse-first && pip install -r reuse-first/server/requirements.txt && claude --plugin-dir reuse-first
+```
+![Demo: reuse-first finding URL shorteners and scaffolding a project](assets/demo.gif)
 
 | Part | What it is |
 | --- | --- |
@@ -25,6 +28,16 @@ python demo/app.py
 ```
 
 Open http://localhost:8765. Describe a project, pick a repo, see its blueprint, and download a starter .zip.
+
+## Command line (no install)
+
+`server/cli.py` runs the same three steps with only Python 3.10+, and prints JSON:
+
+```bash
+python server/cli.py find "self-hosted url shortener"
+python server/cli.py blueprint shlinkio/shlink
+python server/cli.py scaffold shlinkio/shlink "My Shortener" "Short links for my team" ./projects
+```
 
 ## Add to Claude Code (full plugin: tools + skill)
 
@@ -66,3 +79,11 @@ python tests/e2e_live.py "self-hosted url shortener"
 - Ranking is a heuristic (recency, stars, issue load, keyword fit), not a quality guarantee.
 - License notes are informational, not legal advice. Unlicensed and copyleft repos are excluded unless you allow copyleft.
 - The scaffold reuses structure and dependency names only, never source code.
+
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Questions and ideas go in [Discussions](https://github.com/beingaeditor/reuse-first/discussions).
+
+## License
+
+[MIT](LICENSE)

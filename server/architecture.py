@@ -6,10 +6,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
-import httpx
-
 from cache import Cache
-from github import API, _headers
+from github import GitHubError, get
 
 MANIFESTS = ("package.json", "pyproject.toml", "requirements.txt", "go.mod", "Cargo.toml",
              "pom.xml", "build.gradle", "Gemfile", "composer.json")
@@ -54,50 +52,43 @@ ENTRY_NAMES = {"main.py", "app.py", "server.py", "manage.py", "__main__.py", "ma
 SKIP = {"node_modules", "vendor", "dist", "build", ".git", "venv", ".venv", "__pycache__", "target"}
 
 
-def _b64(r: httpx.Response, limit: int) -> str:
-    return base64.b64decode(r.json()["content"]).decode("utf-8", "replace")[:limit]
+def _b64(data: dict, limit: int) -> str:
+    return base64.b64decode(data["content"]).decode("utf-8", "replace")[:limit]
 
 
-async def snapshot(full_name: str, cache: Cache, client: httpx.AsyncClient | None = None) -> dict:
+def snapshot(full_name: str, cache: Cache) -> dict:
     """Repo metadata, file paths, README and manifests (cached, ~4-8 API calls when cold)."""
     key = f"snap:{full_name}"
     cached, _ = cache.get(key)
     if cached is not None:
         return cached
-    own = client is None
-    client = client or httpx.AsyncClient(timeout=25)
-    try:
-        h = _headers()
-        r = await client.get(f"{API}/repos/{full_name}", headers=h)
-        r.raise_for_status()
-        repo = r.json()
-        branch = repo.get("default_branch", "main")
-        t = await client.get(f"{API}/repos/{full_name}/git/trees/{branch}?recursive=1", headers=h)
-        tree = t.json().get("tree", []) if t.is_success else []
-        paths = [x["path"] for x in tree if x.get("type") == "blob"
-                 and not SKIP.intersection(x["path"].split("/"))]
-        rd = await client.get(f"{API}/repos/{full_name}/readme", headers=h)
-        readme = _b64(rd, 6000) if rd.is_success else ""
-        manifests: dict[str, str] = {}
-        wanted = [p for p in paths if p.split("/")[-1] in MANIFESTS and p.count("/") <= 2]
-        wanted.sort(key=lambda p: p.count("/"))
-        for p in wanted[:5]:
-            m = await client.get(f"{API}/repos/{full_name}/contents/{p}", headers=h)
-            if m.is_success and m.json().get("encoding") == "base64":
-                manifests[p] = _b64(m, 8000)
-        snap = {
-            "full_name": full_name, "url": repo.get("html_url"),
-            "description": repo.get("description"), "stars": repo.get("stargazers_count"),
-            "license": (repo.get("license") or {}).get("spdx_id"),
-            "pushed_at": repo.get("pushed_at"), "default_branch": branch,
-            "paths": paths[:5000], "truncated": bool(t.is_success and t.json().get("truncated")),
-            "readme": readme, "manifests": manifests,
-        }
-        cache.put(key, snap)
-        return snap
-    finally:
-        if own:
-            await client.aclose()
+    status, repo, _ = get(f"/repos/{full_name}", timeout=25)
+    if status != 200:
+        raise GitHubError(status, f"/repos/{full_name}")
+    branch = repo.get("default_branch", "main")
+    ts, tree_body, _ = get(f"/repos/{full_name}/git/trees/{branch}", {"recursive": 1}, timeout=25)
+    tree = tree_body.get("tree", []) if ts == 200 else []
+    paths = [x["path"] for x in tree if x.get("type") == "blob"
+             and not SKIP.intersection(x["path"].split("/"))]
+    rs, rd, _ = get(f"/repos/{full_name}/readme", timeout=25)
+    readme = _b64(rd, 6000) if rs == 200 else ""
+    manifests: dict[str, str] = {}
+    wanted = [p for p in paths if p.split("/")[-1] in MANIFESTS and p.count("/") <= 2]
+    wanted.sort(key=lambda p: p.count("/"))
+    for p in wanted[:5]:
+        ms, m, _ = get(f"/repos/{full_name}/contents/{p}", timeout=25)
+        if ms == 200 and m.get("encoding") == "base64":
+            manifests[p] = _b64(m, 8000)
+    snap = {
+        "full_name": full_name, "url": repo.get("html_url"),
+        "description": repo.get("description"), "stars": repo.get("stargazers_count"),
+        "license": (repo.get("license") or {}).get("spdx_id"),
+        "pushed_at": repo.get("pushed_at"), "default_branch": branch,
+        "paths": paths[:5000], "truncated": bool(ts == 200 and tree_body.get("truncated")),
+        "readme": readme, "manifests": manifests,
+    }
+    cache.put(key, snap)
+    return snap
 
 
 def _section(toml: str, name: str) -> str:
